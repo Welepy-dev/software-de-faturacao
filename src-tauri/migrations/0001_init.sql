@@ -42,12 +42,15 @@ CREATE INDEX idx_estabelecimentos_empresa ON estabelecimentos(empresa_id);
 
 -- 2.3 Utilizador --------------------------------------------------------------
 CREATE TABLE utilizadores (
-    id             TEXT PRIMARY KEY,
-    nome           TEXT NOT NULL,
-    email          TEXT NOT NULL UNIQUE,
-    password_hash  TEXT NOT NULL,
-    ativo          INTEGER NOT NULL DEFAULT 1,
-    criado_em      TEXT NOT NULL
+    id                   TEXT PRIMARY KEY,
+    nome                 TEXT NOT NULL,
+    email                TEXT NOT NULL UNIQUE,
+    password_hash        TEXT NOT NULL,
+    -- Requisito AGT (docs/AGT-SAFT.md §5): mudança periódica de senha
+    -- obrigatória; usado pela aplicação para forçar reset ao expirar.
+    password_alterada_em TEXT NOT NULL,
+    ativo                INTEGER NOT NULL DEFAULT 1,
+    criado_em            TEXT NOT NULL
 );
 
 -- utilizador <-> estabelecimentos a que tem acesso
@@ -133,6 +136,36 @@ CREATE TABLE series_documentais (
     UNIQUE (estabelecimento_id, tipo_documento, ano_economico)
 );
 
+-- Certificação AGT (docs/AGT-SAFT.md) -----------------------------------------------
+--
+-- Configuração de instalação/software (linha única) para a certificação AGT.
+-- A chave privada NUNCA fica em texto simples nesta tabela — guarda-se só
+-- uma referência ao segredo (ex. entrada no keystore do SO gerido pelo
+-- Tauri), nunca o valor da chave. Segundo a fonte técnica pesquisada, o par
+-- de chaves é gerado pelo fabricante do software (não por empresa/cliente),
+-- por isso esta tabela tem tipicamente uma única linha por instalação.
+CREATE TABLE configuracao_certificacao_agt (
+    id                      TEXT PRIMARY KEY,
+    numero_certificado_agt  TEXT NOT NULL,
+    chave_publica           TEXT NOT NULL,
+    chave_privada_ref       TEXT NOT NULL,
+    versao_chave            INTEGER NOT NULL DEFAULT 1,
+    criado_em               TEXT NOT NULL
+);
+
+-- Mapeamento tipo de documento -> código exigido pela AGT (usado para
+-- compor o `InvoiceNo` "{código} {série}/{número}" no SAF-T, no webservice
+-- em tempo real, e no carimbo impresso). `codigo_agt` e `tabela_saft` não
+-- têm seed aqui de propósito — só os códigos FT/NC/ND foram confirmados na
+-- investigação (docs/AGT-SAFT.md §8); os restantes tipos (fatura_recibo,
+-- guia_remessa, recibo, proforma, encomenda, orçamento) precisam de
+-- confirmação antes de preencher esta tabela em produção.
+CREATE TABLE codigos_documento_agt (
+    tipo_documento  TEXT PRIMARY KEY,
+    codigo_agt      TEXT NOT NULL,
+    tabela_saft     TEXT NOT NULL -- ex.: 'SalesInvoices', 'WorkingDocuments', 'Payments'
+);
+
 -- 2.12 SessãoCaixa (núcleo dos problemas 1 e 2) --------------------------------
 CREATE TABLE sessoes_caixa (
     id                              TEXT PRIMARY KEY,
@@ -184,8 +217,22 @@ CREATE TABLE documentos (
     documento_origem_id           TEXT REFERENCES documentos(id),
     documento_original_id         TEXT REFERENCES documentos(id),
     motivo_anulacao_retificacao   TEXT,
+    -- Assinatura RSA-SHA1 em cadeia (docs/AGT-SAFT.md §3): mensagem inclui o
+    -- hash do documento anterior da mesma série+tipo+estabelecimento.
     hash                          TEXT,
+    -- Snapshot, no momento da emissão, de `configuracao_certificacao_agt`
+    -- (número de certificado + versão de chave usada) — nunca muda depois,
+    -- mesmo que a configuração da instalação seja atualizada mais tarde.
     codigo_certificacao           TEXT,
+    versao_chave_assinatura       INTEGER,
+    -- Proveniência do registo (docs/AGT-SAFT.md §6): 'manual' e
+    -- 'recuperado_backup' correspondem aos dois cenários de contingência
+    -- documentados pela AGT (falha do software local / restauro de backup
+    -- com documentos em falta). A série de recuperação anual própria para
+    -- estes casos ainda não está modelada — fica para quando o motor de
+    -- emissão for implementado.
+    origem_registo                TEXT NOT NULL DEFAULT 'normal'
+                                  CHECK (origem_registo IN ('normal', 'manual', 'recuperado_backup')),
     via                           TEXT NOT NULL DEFAULT 'original'
                                   CHECK (via IN ('original', 'segunda_via')),
     observacoes                   TEXT,
