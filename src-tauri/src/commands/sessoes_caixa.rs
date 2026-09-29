@@ -1,4 +1,6 @@
+use crate::auth::AuthState;
 use crate::domain::sessao_caixa::{SessaoCaixa, SessaoCaixaTotalPorMetodo};
+use crate::permissoes;
 use chrono::Utc;
 use sqlx::SqlitePool;
 use tauri::State;
@@ -12,10 +14,13 @@ use uuid::Uuid;
 #[tauri::command]
 pub async fn abrir_sessao_caixa(
     pool: State<'_, SqlitePool>,
+    auth_state: State<'_, AuthState>,
     estabelecimento_id: String,
-    utilizador_id: String,
     fundo_maneio_inicial_centimos: i64,
 ) -> Result<SessaoCaixa, String> {
+    let utilizador_id = auth_state.exigir_sessao_ativa()?;
+    permissoes::exigir_permissao(pool.inner(), &utilizador_id, "caixa.abrir", None).await?;
+
     let id = Uuid::new_v4().to_string();
     let agora = Utc::now().to_rfc3339();
 
@@ -54,12 +59,16 @@ pub async fn abrir_sessao_caixa(
 #[tauri::command]
 pub async fn registar_pagamento(
     pool: State<'_, SqlitePool>,
+    auth_state: State<'_, AuthState>,
     documento_id: String,
     sessao_caixa_id: String,
-    utilizador_id: String,
     metodo_pagamento: String,
     valor_centimos: i64,
 ) -> Result<(), String> {
+    let utilizador_id = auth_state.exigir_sessao_ativa()?;
+    permissoes::exigir_permissao(pool.inner(), &utilizador_id, "pagamentos.registar", None)
+        .await?;
+
     let mut tx = pool.inner().begin().await.map_err(|e| e.to_string())?;
     let id = Uuid::new_v4().to_string();
     let agora = Utc::now().to_rfc3339();
@@ -105,14 +114,25 @@ pub async fn registar_pagamento(
 
 /// Fecha a sessão: o total esperado já está pronto (acumulado
 /// incrementalmente), só falta a contagem física de dinheiro para calcular
-/// a diferença — nenhum cálculo manual do funcionário.
+/// a diferença — nenhum cálculo manual do funcionário. Ação sensível:
+/// exige `caixa.fechar` com reautenticação.
 #[tauri::command]
 pub async fn fechar_sessao_caixa(
     pool: State<'_, SqlitePool>,
+    auth_state: State<'_, AuthState>,
     sessao_caixa_id: String,
-    utilizador_id: String,
     contagem_fisica_dinheiro_centimos: i64,
+    password_confirmacao: String,
 ) -> Result<SessaoCaixa, String> {
+    let utilizador_id = auth_state.exigir_sessao_ativa()?;
+    permissoes::exigir_permissao(
+        pool.inner(),
+        &utilizador_id,
+        "caixa.fechar",
+        Some(&password_confirmacao),
+    )
+    .await?;
+
     let totais = sqlx::query_as::<_, SessaoCaixaTotalPorMetodo>(
         "SELECT * FROM sessao_caixa_totais_por_metodo WHERE sessao_caixa_id = ?",
     )
