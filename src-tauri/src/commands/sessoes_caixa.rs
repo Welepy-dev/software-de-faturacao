@@ -2,6 +2,7 @@ use crate::auth::AuthState;
 use crate::domain::sessao_caixa::{SessaoCaixa, SessaoCaixaTotalPorMetodo};
 use crate::permissoes;
 use chrono::Utc;
+use serde::Serialize;
 use sqlx::SqlitePool;
 use tauri::State;
 use uuid::Uuid;
@@ -147,7 +148,18 @@ pub async fn fechar_sessao_caixa(
         .map(|t| t.total_acumulado_centimos)
         .unwrap_or(0);
 
-    let diferenca = contagem_fisica_dinheiro_centimos - total_dinheiro_centimos;
+    // O operador conta a gaveta inteira, por isso o esperado inclui o
+    // fundo de maneio com que a sessão abriu, não só o recebido.
+    let fundo_maneio_centimos: i64 = sqlx::query_scalar(
+        "SELECT fundo_maneio_inicial_centimos FROM sessoes_caixa WHERE id = ?",
+    )
+    .bind(&sessao_caixa_id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let diferenca =
+        contagem_fisica_dinheiro_centimos - (fundo_maneio_centimos + total_dinheiro_centimos);
     let agora = Utc::now().to_rfc3339();
 
     sqlx::query(
@@ -187,6 +199,115 @@ pub async fn obter_sessao_aberta(
     .fetch_optional(pool.inner())
     .await
     .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Serialize)]
+pub struct TotalMetodo {
+    pub metodo_pagamento: String,
+    pub total_centimos: i64,
+    pub pagamentos: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResumoCaixa {
+    pub sessao_aberta: Option<SessaoCaixa>,
+    pub aberta_por_nome: Option<String>,
+    /// Lidos de `sessao_caixa_totais_por_metodo` (acumulado incremental) —
+    /// a contagem de pagamentos é só informativa.
+    pub totais: Vec<TotalMetodo>,
+    pub ultima_fechada: Option<SessaoCaixa>,
+    pub fechada_por_nome: Option<String>,
+    /// Totais da última sessão fechada, para mostrar esperado vs. contado.
+    pub totais_ultima_fechada: Vec<TotalMetodo>,
+}
+
+async fn totais_da_sessao(pool: &SqlitePool, sessao_id: &str) -> Result<Vec<TotalMetodo>, String> {
+    let linhas: Vec<(String, i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT t.metodo_pagamento, t.total_acumulado_centimos,
+               (SELECT COUNT(*) FROM pagamentos p
+                WHERE p.sessao_caixa_id = t.sessao_caixa_id AND p.metodo_pagamento = t.metodo_pagamento)
+        FROM sessao_caixa_totais_por_metodo t
+        WHERE t.sessao_caixa_id = ?
+        "#,
+    )
+    .bind(sessao_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(linhas
+        .into_iter()
+        .map(|(metodo_pagamento, total_centimos, pagamentos)| TotalMetodo {
+            metodo_pagamento,
+            total_centimos,
+            pagamentos,
+        })
+        .collect())
+}
+
+async fn nome_utilizador(pool: &SqlitePool, id: &str) -> Result<Option<String>, String> {
+    sqlx::query_scalar("SELECT nome FROM utilizadores WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Estado da caixa de um estabelecimento para o ecrã "Caixa" e para os
+/// cartões de escolha de estabelecimento: sessão aberta com os totais
+/// correntes por método, e o último fecho.
+#[tauri::command]
+pub async fn obter_resumo_caixa(
+    pool: State<'_, SqlitePool>,
+    estabelecimento_id: String,
+) -> Result<ResumoCaixa, String> {
+    let pool = pool.inner();
+    let sessao_aberta: Option<SessaoCaixa> = sqlx::query_as(
+        "SELECT * FROM sessoes_caixa WHERE estabelecimento_id = ? AND estado = 'aberta'",
+    )
+    .bind(&estabelecimento_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let ultima_fechada: Option<SessaoCaixa> = sqlx::query_as(
+        r#"
+        SELECT * FROM sessoes_caixa
+        WHERE estabelecimento_id = ? AND estado = 'fechada'
+        ORDER BY fechada_em DESC LIMIT 1
+        "#,
+    )
+    .bind(&estabelecimento_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let (aberta_por_nome, totais) = match &sessao_aberta {
+        Some(s) => (
+            nome_utilizador(pool, &s.aberta_por_utilizador_id).await?,
+            totais_da_sessao(pool, &s.id).await?,
+        ),
+        None => (None, Vec::new()),
+    };
+    let (fechada_por_nome, totais_ultima_fechada) = match &ultima_fechada {
+        Some(s) => (
+            match &s.fechada_por_utilizador_id {
+                Some(id) => nome_utilizador(pool, id).await?,
+                None => None,
+            },
+            totais_da_sessao(pool, &s.id).await?,
+        ),
+        None => (None, Vec::new()),
+    };
+
+    Ok(ResumoCaixa {
+        sessao_aberta,
+        aberta_por_nome,
+        totais,
+        ultima_fechada,
+        fechada_por_nome,
+        totais_ultima_fechada,
+    })
 }
 
 async fn buscar_sessao(pool: State<'_, SqlitePool>, id: String) -> Result<SessaoCaixa, String> {

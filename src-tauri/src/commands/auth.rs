@@ -83,6 +83,17 @@ pub fn estado_sessao(auth_state: State<'_, AuthState>) -> Result<Option<EstadoSe
     }))
 }
 
+/// Bloqueio manual (botão "Bloquear" / F12) — mesmo efeito do bloqueio por
+/// inatividade: o turno fica, só o mesmo operador desbloqueia.
+#[tauri::command]
+pub fn bloquear_sessao(auth_state: State<'_, AuthState>) -> Result<(), String> {
+    let mut guard = auth_state.0.lock().unwrap();
+    if let Some(sessao) = guard.as_mut() {
+        sessao.bloqueada = true;
+    }
+    Ok(())
+}
+
 /// Desbloqueia a sessão do mesmo operador com a password — não é um
 /// login novo, o turno continua onde estava.
 #[tauri::command]
@@ -113,4 +124,57 @@ pub async fn desbloquear_sessao(
         sessao.ultima_atividade = Instant::now();
     }
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+pub struct Operador {
+    pub id: String,
+    pub nome: String,
+    pub email: String,
+    pub papel: Option<String>,
+    /// Estabelecimentos atribuídos em `utilizador_estabelecimentos`. Vazio
+    /// quer dizer "sem restrição" (ainda não há UI para atribuir).
+    pub estabelecimento_ids: Vec<String>,
+}
+
+/// Lista os operadores ativos para o ecrã de login ("Quem está ao
+/// balcão?") — chamado antes de haver sessão, por isso nunca devolve
+/// nada além de identificação pública (sem hash, sem permissões).
+#[tauri::command]
+pub async fn listar_operadores(pool: State<'_, SqlitePool>) -> Result<Vec<Operador>, String> {
+    let linhas: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT u.id, u.nome, u.email,
+               (SELECT p.nome FROM utilizador_papeis up JOIN papeis p ON p.id = up.papel_id
+                WHERE up.utilizador_id = u.id LIMIT 1)
+        FROM utilizadores u
+        WHERE u.ativo = 1
+        ORDER BY u.nome
+        "#,
+    )
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let atribuicoes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT utilizador_id, estabelecimento_id FROM utilizador_estabelecimentos",
+    )
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(linhas
+        .into_iter()
+        .map(|(id, nome, email, papel)| Operador {
+            estabelecimento_ids: atribuicoes
+                .iter()
+                .filter(|(u, _)| *u == id)
+                .map(|(_, e)| e.clone())
+                .collect(),
+            id,
+            nome,
+            email,
+            papel,
+        })
+        .collect())
 }

@@ -26,7 +26,9 @@ pub fn run() {
             commands::auth::logout,
             commands::auth::tocar_atividade,
             commands::auth::estado_sessao,
+            commands::auth::bloquear_sessao,
             commands::auth::desbloquear_sessao,
+            commands::auth::listar_operadores,
             // Utilizadores
             commands::utilizadores::criar_primeiro_utilizador,
             commands::utilizadores::criar_utilizador,
@@ -65,6 +67,7 @@ pub fn run() {
             commands::sessoes_caixa::registar_pagamento,
             commands::sessoes_caixa::fechar_sessao_caixa,
             commands::sessoes_caixa::obter_sessao_aberta,
+            commands::sessoes_caixa::obter_resumo_caixa,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
